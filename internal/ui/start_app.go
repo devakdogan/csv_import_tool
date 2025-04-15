@@ -301,7 +301,7 @@ func buildUI(w fyne.Window, lang *string, config *dbConfig, selectedDB *string, 
 		appendLog(logOutput, fmt.Sprintf("Starting import process for %s database...", *selectedDB))
 		appendLog(logOutput, fmt.Sprintf("Using folder: %s", folderPath.Text))
 		appendLog(logOutput, fmt.Sprintf("Database: %s@%s:%s/%s", config.User.Text, config.Host.Text, config.Port.Text, config.Database.Text))
-		importer.ImportCSVFiles(*selectedDB, (*db.DbConfig)(config), logOutput)
+		importer.ImportCSVFiles(folderPath.Text, *selectedDB, (*db.DbConfig)(config), logOutput)
 	})
 
 	importButton.Resize(fyne.NewSize(150, 40))

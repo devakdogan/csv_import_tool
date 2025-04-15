@@ -8,6 +8,7 @@ import (
 	"github.com/devakdogan/go_csv_adapter/internal/db"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -182,7 +183,7 @@ func InsertCSVRecords(dbConn *sql.DB, tableName string, headers []string, record
 	return nil
 }
 
-func ImportCSVFiles(dbType string, config *db.DbConfig, logOutput *widget.TextGrid) {
+func ImportCSVFiles(folderPath string, dbType string, config *db.DbConfig, logOutput *widget.TextGrid) {
 	// Start loading animation in a separate goroutine
 	stopAnimation := make(chan bool)
 	animationDone := make(chan bool)
@@ -314,6 +315,69 @@ func ImportCSVFiles(dbType string, config *db.DbConfig, logOutput *widget.TextGr
 		}
 	}(dbConn)
 
-	// Continue with the original ImportCSVFiles logic
-	// ... rest of the function remains the same ...
+	files, err := os.ReadDir(folderPath)
+	if err != nil {
+		appendLog(logOutput, fmt.Sprintf("Error reading folder: %v", err))
+		return
+	}
+
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".csv") {
+			continue
+		}
+
+		filePath := filepath.Join(folderPath, file.Name())
+		appendLog(logOutput, fmt.Sprintf("Processing file: %s", file.Name()))
+
+		// Header + örnek kayıtları oku
+		headers, samples, err := readCSVHeadersAndSamples(filePath, 10)
+		if err != nil {
+			appendLog(logOutput, fmt.Sprintf("Error reading CSV: %v", err))
+			continue
+		}
+
+		types := inferColumnTypes(headers, samples)
+
+		rawName := strings.TrimSuffix(file.Name(), ".csv")
+		tableName := fmt.Sprintf("%s", rawName)
+
+		// CREATE TABLE
+		createSQL := GenerateCreateTableSQL(tableName, headers, types)
+		_, err = dbConn.Exec(createSQL)
+		if err != nil {
+			appendLog(logOutput, fmt.Sprintf("Error creating table %s: %v", tableName, err))
+			continue
+		}
+
+		f, err := os.Open(filePath)
+		if err != nil {
+			appendLog(logOutput, fmt.Sprintf("Error reopening CSV: %v", err))
+			continue
+		}
+		defer f.Close()
+
+		r := csv.NewReader(f)
+		r.FieldsPerRecord = -1
+		_, _ = r.Read()
+
+		var records [][]string
+		for {
+			record, err := r.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				appendLog(logOutput, fmt.Sprintf("Error reading row: %v", err))
+				break
+			}
+			records = append(records, record)
+		}
+
+		err = InsertCSVRecords(dbConn, tableName, headers, records, dbType)
+		if err != nil {
+			appendLog(logOutput, fmt.Sprintf("Insert error for %s: %v", tableName, err))
+		} else {
+			appendLog(logOutput, fmt.Sprintf("Imported into table: %s", tableName))
+		}
+	}
 }
