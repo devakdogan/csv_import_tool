@@ -14,6 +14,60 @@ import (
 	"time"
 )
 
+type LoadingHandle struct {
+	stopChan      chan bool
+	animationDone chan bool
+}
+
+func StartLoadingAnimation(logOutput *widget.TextGrid, baseMessage string) *LoadingHandle {
+	stopChan := make(chan bool)
+	animationDone := make(chan bool)
+
+	go func() {
+		loadingStates := []string{".", "..", "..."}
+		currentText := logOutput.Text()
+		lastLineIndex := strings.LastIndex(currentText, "\n")
+		if lastLineIndex == -1 {
+			lastLineIndex = 0
+		} else {
+			lastLineIndex += 1
+		}
+		baseText := currentText[:lastLineIndex]
+		i := 0
+
+		for {
+			select {
+			case <-stopChan:
+				timestamp := time.Now().Format("15:04:05")
+				finalText := fmt.Sprintf("%s[%s] %s - Complete\n",
+					baseText, timestamp, baseMessage)
+				logOutput.SetText(finalText)
+				logOutput.Refresh()
+				animationDone <- true
+				return
+			default:
+				timestamp := time.Now().Format("15:04:05")
+				animationText := fmt.Sprintf("%s[%s] %s%s",
+					baseText, timestamp, baseMessage, loadingStates[i])
+				logOutput.SetText(animationText)
+				logOutput.Refresh()
+				i = (i + 1) % len(loadingStates)
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+	}()
+
+	return &LoadingHandle{
+		stopChan:      stopChan,
+		animationDone: animationDone,
+	}
+}
+
+func (h *LoadingHandle) Stop() {
+	h.stopChan <- true
+	<-h.animationDone
+}
+
 func appendLog(grid *widget.TextGrid, message string) {
 	timestamp := time.Now().Format("15:04:05")
 	logLine := fmt.Sprintf("[%s] %s\n", timestamp, message)
@@ -188,50 +242,7 @@ func ImportCSVFiles(folderPath string, dbType string, config *db.DbConfig, logOu
 	stopAnimation := make(chan bool)
 	animationDone := make(chan bool)
 
-	go func() {
-		loadingStates := []string{".", "..", "..."}
-		baseMessage := fmt.Sprintf("Connecting to %s database", dbType)
-
-		// Save the current log text to restore it later
-		currentText := logOutput.Text()
-		lastLineIndex := strings.LastIndex(currentText, "\n")
-		if lastLineIndex == -1 {
-			lastLineIndex = 0
-		} else {
-			lastLineIndex += 1 // Skip the newline character
-		}
-		baseText := currentText[:lastLineIndex]
-
-		i := 0
-		for {
-			select {
-			case <-stopAnimation:
-				// Important: Add a new line after animation stops
-				timestamp := time.Now().Format("15:04:05")
-				finalText := fmt.Sprintf("%s[%s] %s - Complete\n",
-					baseText, timestamp, baseMessage)
-				logOutput.SetText(finalText)
-				logOutput.Refresh()
-				animationDone <- true
-				return
-			default:
-				// Create loading animation
-				timestamp := time.Now().Format("15:04:05")
-				animationText := fmt.Sprintf("%s[%s] %s%s",
-					baseText, timestamp, baseMessage, loadingStates[i])
-
-				// Update text grid
-				logOutput.SetText(animationText)
-				logOutput.Refresh()
-
-				// Move to next animation state
-				i = (i + 1) % len(loadingStates)
-
-				// Wait before updating animation
-				time.Sleep(500 * time.Millisecond)
-			}
-		}
-	}()
+	dbConnection := StartLoadingAnimation(logOutput, fmt.Sprintf("Connecting to %s database", dbType))
 
 	// Attempt to create database provider
 	provider, err := createDBProvider(dbType, config)
@@ -240,8 +251,7 @@ func ImportCSVFiles(folderPath string, dbType string, config *db.DbConfig, logOu
 	time.Sleep(1 * time.Second)
 
 	// Stop animation and wait for it to complete properly
-	stopAnimation <- true
-	<-animationDone
+	dbConnection.Stop()
 
 	// Continue with normal import process
 	if err != nil {
@@ -329,7 +339,6 @@ func ImportCSVFiles(folderPath string, dbType string, config *db.DbConfig, logOu
 		filePath := filepath.Join(folderPath, file.Name())
 		appendLog(logOutput, fmt.Sprintf("Processing file: %s", file.Name()))
 
-		// Header + örnek kayıtları oku
 		headers, samples, err := readCSVHeadersAndSamples(filePath, 10)
 		if err != nil {
 			appendLog(logOutput, fmt.Sprintf("Error reading CSV: %v", err))

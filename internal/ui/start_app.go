@@ -308,10 +308,14 @@ func buildUI(w fyne.Window, lang *string, config *dbConfig, selectedDB *string, 
 
 	// CSV Path gösterimi
 	pathLabel := widget.NewLabel("CSV Path: ")
+	devLogo := canvas.NewImageFromFile("assets/dev/logo.png")
 	devImage := canvas.NewImageFromFile("assets/dev/dev.png")
+	devLogo.FillMode = canvas.ImageFillContain
 	devImage.FillMode = canvas.ImageFillContain
-	devImage.SetMinSize(fyne.NewSize(400, 100)) // Dilersen boyutu değiştir
-	devImageContainer := container.NewCenter(devImage)
+	devLogo.SetMinSize(fyne.NewSize(75, 75))
+	devImage.SetMinSize(fyne.NewSize(400, 75)) // Dilersen boyutu değiştir
+	hbox := container.NewHBox(devLogo, devImage)
+	devFooter := container.NewCenter(hbox)
 	pathLabel.TextStyle.Bold = true
 	pathText := widget.NewLabel(folderPath.Text)
 	pathContainer := container.NewHBox(pathLabel, pathText)
@@ -328,7 +332,7 @@ func buildUI(w fyne.Window, lang *string, config *dbConfig, selectedDB *string, 
 		topRight,
 		container.NewPadded(dbBox),
 		container.NewPadded(logsBox),
-		devImageContainer,
+		devFooter,
 		pathContainer,
 		bottomSection,
 	)
