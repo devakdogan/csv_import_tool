@@ -4,14 +4,16 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"fmt"
-	"fyne.io/fyne/v2/widget"
-	"github.com/devakdogan/go_csv_adapter/internal/db"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"fyne.io/fyne/v2/widget"
+	"github.com/devakdogan/go_csv_adapter/internal/db"
 )
 
 type LoadingHandle struct {
@@ -172,73 +174,145 @@ func GenerateCreateTableSQL(tableName string, headers []string, types []string) 
 	stmt += ");"
 	return stmt
 }
-func EscapeIdentifier(s string) string {
-	return fmt.Sprintf(`"%s"`, s)
-}
 
-func InsertCSVRecords(dbConn *sql.DB, tableName string, headers []string, records [][]string, dbType string) error {
-	// Escape the table name to prevent SQL injection
-	escapedTable := EscapeIdentifier(tableName)
+func BulkInsertCSVRecords(
+	dbConn *sql.DB,
+	tableName string,
+	headers []string,
+	records [][]string,
+	dbType string,
+	batchSize int,
+	workerCount int,
+	logOutput *widget.TextGrid,
+	updateProgress func(int, int),
+) error {
+	// Ensure we don't create more workers than needed
+	totalBatches := (len(records) + batchSize - 1) / batchSize
+	if workerCount > totalBatches {
+		workerCount = totalBatches
+	}
+	if workerCount <= 0 {
+		workerCount = 1
+	}
 
-	// Prepare column names and placeholders arrays
-	escapedCols := make([]string, len(headers))
-	placeholders := make([]string, len(headers))
+	var wg sync.WaitGroup
+	tasks := make(chan [][]string, workerCount*2) // Buffer channel to avoid blocking
+	errChan := make(chan error, workerCount)
+	total := len(records)
+	progress := make([]int, workerCount)
+	progressLock := sync.Mutex{}
 
-	// Process each header column
-	for i := range headers {
-		// Escape column names
-		escapedCols[i] = EscapeIdentifier(headers[i])
+	// Initialize progress to 0%
+	updateProgress(0, 0)
 
-		// Use database-specific placeholders
-		switch dbType {
-		case "PostgreSQL":
-			// PostgreSQL uses $1, $2, $3 format for parameters
-			placeholders[i] = fmt.Sprintf("$%d", i+1)
-		case "MySQL":
-			// MySQL can use ? placeholders
-			placeholders[i] = "?"
-		case "SQLite":
-			// SQLite uses ? placeholders
-			placeholders[i] = "?"
-		default:
-			// Default to ? as placeholder for other databases
-			placeholders[i] = "?"
+	// Create workers
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for batch := range tasks {
+				// Add a small delay to avoid database overload
+				time.Sleep(10 * time.Millisecond)
+
+				if err := insertBatch(dbConn, tableName, headers, batch, dbType); err != nil {
+					errChan <- fmt.Errorf("worker %d: %v", workerID, err)
+					appendLog(logOutput, fmt.Sprintf("Worker-%02d error: %v", workerID, err))
+				} else {
+					progressLock.Lock()
+					progress[workerID-1] += len(batch)
+					// Calculate total progress across all workers
+					totalProcessed := 0
+					for _, p := range progress {
+						totalProcessed += p
+					}
+					percent := int(float64(totalProcessed) / float64(total) * 100)
+					if percent > 100 {
+						percent = 100
+					}
+					// Use 0 as workerID since we're only updating a single progress bar
+					updateProgress(0, percent)
+					progressLock.Unlock()
+				}
+			}
+		}(i + 1)
+	}
+
+	// Distribute tasks to workers
+	// Send batches to workers
+	for i := 0; i < len(records); i += batchSize {
+		endIndex := i + batchSize
+		if endIndex > len(records) {
+			endIndex = len(records)
+		}
+		tasks <- records[i:endIndex]
+	}
+
+	close(tasks)
+	wg.Wait()
+	close(errChan)
+
+	// Check for errors
+	var errs []error
+	for err := range errChan {
+		if err != nil {
+			errs = append(errs, err)
 		}
 	}
 
-	// Construct the SQL insert statement
-	insertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-		escapedTable,
-		strings.Join(escapedCols, ", "),
-		strings.Join(placeholders, ", "),
-	)
-
-	// Prepare the statement for execution
-	stmt, err := dbConn.Prepare(insertStmt)
-	if err != nil {
-		return fmt.Errorf("failed to prepare insert statement: %v", err)
+	if len(errs) > 0 {
+		errMsg := fmt.Sprintf("%d errors occurred during import", len(errs))
+		appendLog(logOutput, errMsg)
+		return fmt.Errorf("%s", errMsg)
 	}
-	defer stmt.Close()
 
-	// Insert each record from the CSV
-	for _, row := range records {
-		// Create arguments slice from row values
-		args := make([]interface{}, len(row))
-		for i, val := range row {
-			args[i] = val
-		}
-
-		// Execute the prepared statement with row values
-		if _, err := stmt.Exec(args...); err != nil {
-			return fmt.Errorf("insert failed for row: %v, error: %v", row, err)
-		}
-	}
+	// Set progress bar to 100% when complete
+	updateProgress(0, 100)
 
 	return nil
 }
+func insertBatch(dbConn *sql.DB, tableName string, headers []string, records [][]string, dbType string) error {
+	if len(records) == 0 {
+		return nil
+	}
 
-func ImportCSVFiles(folderPath string, dbType string, config *db.DbConfig, logOutput *widget.TextGrid) {
-	// Start loading animation in a separate goroutine
+	escapedTable := EscapeIdentifier(tableName)
+	escapedCols := make([]string, len(headers))
+	for i, h := range headers {
+		escapedCols[i] = EscapeIdentifier(h)
+	}
+
+	var placeholders []string
+	var args []interface{}
+	argIndex := 1
+
+	for _, record := range records {
+		phs := make([]string, len(record))
+		for j, val := range record {
+			ph := "?"
+			if dbType == "PostgreSQL" {
+				ph = fmt.Sprintf("$%d", argIndex)
+				argIndex++
+			}
+			phs[j] = ph
+			args = append(args, val)
+		}
+		placeholders = append(placeholders, fmt.Sprintf("(%s)", strings.Join(phs, ", ")))
+	}
+
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s",
+		escapedTable,
+		strings.Join(escapedCols, ", "),
+		strings.Join(placeholders, ", "))
+
+	_, err := dbConn.Exec(query, args...)
+	return err
+}
+
+func EscapeIdentifier(s string) string {
+	return fmt.Sprintf("\"%s\"", s)
+}
+
+func ImportCSVFiles(folderPath string, dbType string, config *db.DbConfig, logOutput *widget.TextGrid, updateProgress func(int, int)) { // Start loading animation in a separate goroutine
 	stopAnimation := make(chan bool)
 	animationDone := make(chan bool)
 
@@ -382,7 +456,7 @@ func ImportCSVFiles(folderPath string, dbType string, config *db.DbConfig, logOu
 			records = append(records, record)
 		}
 
-		err = InsertCSVRecords(dbConn, tableName, headers, records, dbType)
+		err = BulkInsertCSVRecords(dbConn, tableName, headers, records, dbType, 1000, 10, logOutput, updateProgress)
 		if err != nil {
 			appendLog(logOutput, fmt.Sprintf("Insert error for %s: %v", tableName, err))
 		} else {

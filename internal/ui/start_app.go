@@ -73,29 +73,52 @@ func loadIcon(path string) *canvas.Image {
 	return img
 }
 
+// Variables for auto-scrolling logs
+var logScroll *container.Scroll
+var logOutput *widget.TextGrid
+
+// Variable for progress bar
+var progressBar *widget.ProgressBar
+
 func StartApp() {
 	a := app.NewWithID("csv-import-tool")
 	w := a.NewWindow("CSV Import Tool")
 	w.SetMaster()
 	w.Resize(fyne.NewSize(800, 600))
-
-	// Koyu tema ayarla
 	a.Settings().SetTheme(theme.DarkTheme())
 
 	currentLang := "English"
 	selectedDB := new(string)
 	config := &dbConfig{}
 	isPopupOpen := new(bool)
-
 	folderPath := widget.NewLabel(translations[currentLang]["NoFolderSelected"])
 	folderPath.Wrapping = fyne.TextTruncate
 
+	// Initialize the log output and scroll container
+	logOutput = widget.NewTextGrid()
+	logScroll = container.NewScroll(logOutput)
+	logScroll.SetMinSize(fyne.NewSize(700, 200))
+	
+	// Create a single progress bar for the current CSV file
+	progressBar = widget.NewProgressBar()
+	progressBar.Min = 0
+	progressBar.Max = 100
+	progressBar.SetValue(0)
+	// Make percentage text centered and white
+	progressBar.TextFormatter = func() string {
+		return fmt.Sprintf("%d%%", int(progressBar.Value))
+	}
+	
+	updateProgress := func(workerID int, percent int) {
+		// Update the progress bar directly
+		progressBar.SetValue(float64(percent))
+	}
+
 	var updateUI func()
 	updateUI = func() {
-		w.SetContent(buildUI(w, &currentLang, config, selectedDB, folderPath, updateUI, isPopupOpen))
+		w.SetContent(buildUI(w, &currentLang, config, selectedDB, folderPath, updateUI, isPopupOpen, logOutput, updateProgress))
 	}
 	updateUI()
-
 	w.ShowAndRun()
 }
 
@@ -123,10 +146,11 @@ func (t *customTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Co
 	}
 }
 
-func buildUI(w fyne.Window, lang *string, config *dbConfig, selectedDB *string, folderPath *widget.Label, refreshFunc func(), isPopupOpen *bool) fyne.CanvasObject {
+func buildUI(w fyne.Window, lang *string, config *dbConfig, selectedDB *string, folderPath *widget.Label,
+	refreshFunc func(), isPopupOpen *bool, logOutput *widget.TextGrid, 
+	updateProgress func(int, int)) fyne.CanvasObject {
 	t := translations[*lang]
 
-	// Dil seçimi
 	langSelect := widget.NewSelect([]string{"English", "Türkçe"}, func(selected string) {
 		*lang = selected
 		refreshFunc()
@@ -135,14 +159,10 @@ func buildUI(w fyne.Window, lang *string, config *dbConfig, selectedDB *string, 
 	langSelect.Resize(fyne.NewSize(120, 35))
 	topRight := container.NewHBox(layout.NewSpacer(), langSelect)
 
-	// Database kartlarını oluştur
 	dbTypes := []string{"PostgreSQL", "MySQL", "SQLite"}
 	var dbCards []fyne.CanvasObject
-
-	// Database bölümü başlığı
 	dbTitle := widget.NewLabelWithStyle("Database", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
-	// Her bir DB için kart oluştur
 	for _, db := range dbTypes {
 		dbNameCopy := db
 		var icon *canvas.Image
@@ -154,12 +174,9 @@ func buildUI(w fyne.Window, lang *string, config *dbConfig, selectedDB *string, 
 		case "SQLite":
 			icon = loadIcon("assets/icons/sqlite.png")
 		}
-
-		// İkon boyutunu ayarla
 		icon.SetMinSize(fyne.NewSize(48, 48))
 		icon.Resize(fyne.NewSize(48, 48))
 
-		// DB seçme butonu
 		dbButton := widget.NewButton("", func() {
 			if *isPopupOpen {
 				return
@@ -176,10 +193,8 @@ func buildUI(w fyne.Window, lang *string, config *dbConfig, selectedDB *string, 
 			}
 		})
 
-		// Buton içeriği
 		isSelected := *selectedDB == dbNameCopy
 		if isSelected {
-			// Seçili kart için parlak gri arka plan
 			dbButton.Importance = widget.HighImportance
 			editButton := widget.NewButton(t["Edit"], func() {
 				if *isPopupOpen {
@@ -215,59 +230,45 @@ func buildUI(w fyne.Window, lang *string, config *dbConfig, selectedDB *string, 
 			dbCards = append(dbCards, cardContainer)
 		}
 	}
-
-	// Database kartları için container
 	dbContainer := container.NewGridWithColumns(3)
 	for _, card := range dbCards {
-		// Kartı sabit genişliğe zorla
 		cardContainer := container.NewMax(card)
-		cardContainer.Resize(fyne.NewSize(220, 150)) // genişlik, yükseklik ayarlanabilir
+		cardContainer.Resize(fyne.NewSize(220, 150))
 		dbContainer.Add(cardContainer)
 	}
 	dbContainer.Add(layout.NewSpacer())
-
-	// Database bölümü için border
 	dbBorder := canvas.NewRectangle(theme.ForegroundColor())
 	dbBorder.StrokeColor = theme.ForegroundColor()
 	dbBorder.StrokeWidth = 1
 	dbBorder.FillColor = theme.BackgroundColor()
+	dbSection := container.NewVBox(dbTitle, container.NewPadded(dbContainer))
+	dbBox := container.NewMax(dbBorder, container.NewPadded(dbSection))
 
-	dbSection := container.NewVBox(
-		dbTitle,
-		container.NewPadded(dbContainer),
-	)
-
-	dbBox := container.NewMax(
-		dbBorder,
-		container.NewPadded(dbSection),
-	)
-
-	// Logs bölümü
 	logsTitle := widget.NewLabelWithStyle("Logs", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	logOutput := widget.NewTextGrid()
-	logScroll := container.NewScroll(logOutput)
-	logScroll.SetMinSize(fyne.NewSize(700, 200))
-
-	// Logs bölümü için border
 	logsBorder := canvas.NewRectangle(theme.ForegroundColor())
 	logsBorder.StrokeColor = theme.ForegroundColor()
 	logsBorder.StrokeWidth = 1
 	logsBorder.FillColor = theme.BackgroundColor()
+	logsSection := container.NewBorder(logsTitle, nil, nil, nil, container.NewPadded(logScroll))
+	logsBox := container.NewMax(logsBorder, container.NewPadded(logsSection))
 
-	logsSection := container.NewBorder(
-		logsTitle,
-		nil,
-		nil,
-		nil,
-		container.NewPadded(logScroll),
+	// Create a container for the progress bar
+	progressLabel := widget.NewLabel("Import Progress:")
+	progressLabel.TextStyle = fyne.TextStyle{Bold: true}
+	
+	progressContainer := container.NewVBox(
+		progressLabel,
+		progressBar,
 	)
+	progressContainer.Resize(fyne.NewSize(700, 60))
+	
+	progressBox := container.NewPadded(progressContainer)
 
-	logsBox := container.NewMax(
-		logsBorder,
-		container.NewPadded(logsSection),
-	)
+	pathLabel := widget.NewLabel("CSV Path: ")
+	pathLabel.TextStyle.Bold = true
+	pathText := widget.NewLabel(folderPath.Text)
+	pathContainer := container.NewHBox(pathLabel, pathText)
 
-	// Alt kısım butonları
 	folderButton := widget.NewButton(t["ChooseFolder"], func() {
 		if *isPopupOpen {
 			return
@@ -301,43 +302,23 @@ func buildUI(w fyne.Window, lang *string, config *dbConfig, selectedDB *string, 
 		appendLog(logOutput, fmt.Sprintf("Starting import process for %s database...", *selectedDB))
 		appendLog(logOutput, fmt.Sprintf("Using folder: %s", folderPath.Text))
 		appendLog(logOutput, fmt.Sprintf("Database: %s@%s:%s/%s", config.User.Text, config.Host.Text, config.Port.Text, config.Database.Text))
-		importer.ImportCSVFiles(folderPath.Text, *selectedDB, (*db.DbConfig)(config), logOutput)
-	})
 
+		importer.ImportCSVFiles(folderPath.Text, *selectedDB, (*db.DbConfig)(config), logOutput, func(workerID int, percent int) {
+			// Update the progress bar directly
+			progressBar.SetValue(float64(percent))
+		})
+	})
 	importButton.Resize(fyne.NewSize(150, 40))
 
-	// CSV Path gösterimi
-	pathLabel := widget.NewLabel("CSV Path: ")
-	devLogo := canvas.NewImageFromFile("assets/dev/logo.png")
-	devImage := canvas.NewImageFromFile("assets/dev/dev.png")
-	devLogo.FillMode = canvas.ImageFillContain
-	devImage.FillMode = canvas.ImageFillContain
-	devLogo.SetMinSize(fyne.NewSize(75, 75))
-	devImage.SetMinSize(fyne.NewSize(400, 75)) // Dilersen boyutu değiştir
-	hbox := container.NewHBox(devLogo, devImage)
-	devFooter := container.NewCenter(hbox)
-	pathLabel.TextStyle.Bold = true
-	pathText := widget.NewLabel(folderPath.Text)
-	pathContainer := container.NewHBox(pathLabel, pathText)
-
-	// Alt kısım container'ı
-	bottomSection := container.NewHBox(
-		folderButton,
-		layout.NewSpacer(),
-		importButton,
-	)
-
-	// Ana container
+	bottomSection := container.NewHBox(folderButton, layout.NewSpacer(), importButton)
 	mainContent := container.NewVBox(
 		topRight,
 		container.NewPadded(dbBox),
 		container.NewPadded(logsBox),
-		devFooter,
+		progressBox,
 		pathContainer,
 		bottomSection,
 	)
-
-	// Tüm içeriği padding ile sar
 	return container.NewPadded(mainContent)
 }
 
@@ -468,6 +449,8 @@ func showDBPopup(mainWindow fyne.Window, lang *string, config *dbConfig, dbType 
 }
 
 // Log mesajlarını eklemek için yardımcı fonksiyon
+// Using the package-level globalLogScroll variable
+
 func appendLog(grid *widget.TextGrid, message string) {
 	timestamp := time.Now().Format("15:04:05")
 	logLine := fmt.Sprintf("[%s] %s\n", timestamp, message)
@@ -475,6 +458,15 @@ func appendLog(grid *widget.TextGrid, message string) {
 	currentText := grid.Text()
 	grid.SetText(currentText + logLine)
 
-	// Scroll'u en alta kaydır
+	// Refresh the grid
 	grid.Refresh()
+	
+	// Auto-scroll to the bottom
+	if logScroll != nil {
+		// Use a goroutine to ensure the scroll happens after the UI updates
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			logScroll.ScrollToBottom()
+		}()
+	}
 }
